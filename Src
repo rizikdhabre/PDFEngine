@@ -1,0 +1,333 @@
+import sys
+import math
+from dataclasses import dataclass
+from typing import List, Tuple, Optional
+
+from PyQt6.QtWidgets import (
+    QApplication, QWidget, QVBoxLayout, QPushButton, QFileDialog,
+    QLabel, QComboBox, QTextEdit, QHBoxLayout, QMessageBox
+)
+import fitz  # PyMuPDF
+
+
+# ------------------------------------------------------------
+# Signature logic (your delta-based method) and helpers
+# ------------------------------------------------------------
+
+SIG_PAIRS = [(32, 28), (28, 24), (24, 20), (20, 16)]
+
+@dataclass
+class Plan:
+    pair: Tuple[int, int]        # (large, small) sorted desc internally
+    count_hi: int                # number of large signatures
+    count_lo: int                # number of small signatures
+    total_pages: int             # count_hi*large + count_lo*small
+    blanks: int                  # total_pages - n_pages
+    expression: str               # e.g., "5*32 + 22*28"
+    sequence: List[int]           # expanded array [32,28,32,28,...,28]
+
+def compute_plan_for_pair(n_pages: int, a: int, b: int) -> Plan:
+    large, small = (a, b) if a > b else (b, a)
+
+    # Step 1: pack as many small signatures as possible
+    lo_fit = n_pages // small
+    used = lo_fit * small
+    r = n_pages - used
+
+    delta = large - small
+    if r <= 0:
+        count_hi = 0
+        count_lo = lo_fit
+    else:
+        x = math.ceil(r / delta)
+        if x > lo_fit:
+            count_hi = x
+            count_lo = 0
+        else:
+            count_hi = x
+            count_lo = lo_fit - x
+
+    total = count_hi * large + count_lo * small
+    remainder4 = total % 4
+    if remainder4 != 0:
+        total += (4 - remainder4)
+
+    blanks = total - n_pages
+
+    parts = []
+    if count_hi > 0:
+        parts.append(f"{count_hi}*{large}")
+    if count_lo > 0:
+        parts.append(f"{count_lo}*{small}")
+    expression = " + ".join(parts) if parts else f"0*{large}"
+
+    # Corrected sequence logic
+    seq = []
+    if count_hi > 0 and count_lo > 0:
+        # Alternate large-small until one runs out
+        hi_remaining = count_hi
+        lo_remaining = count_lo
+        while hi_remaining > 0 and lo_remaining > 0:
+            seq.append(large)
+            hi_remaining -= 1
+            seq.append(small)
+            lo_remaining -= 1
+        # Append any leftover large or small signatures
+        seq.extend([large] * hi_remaining)
+        seq.extend([small] * lo_remaining)
+    elif count_hi > 0:
+        seq = [large] * count_hi
+    elif count_lo > 0:
+        seq = [small] * count_lo
+
+    return Plan(pair=(large, small), count_hi=count_hi, count_lo=count_lo,
+                total_pages=total, blanks=blanks, expression=expression, sequence=seq)
+
+def choose_best_plan(n_pages: int) -> Tuple[Plan, List[Plan]]:
+    plans = [compute_plan_for_pair(n_pages, a, b) for (a, b) in SIG_PAIRS]
+    plans.sort(key=lambda p: (p.blanks, p.total_pages))
+    return plans[0], plans
+
+
+# ------------------------------------------------------------
+# Geometry helpers
+# ------------------------------------------------------------
+
+def a4_rect_landscape() -> fitz.Rect:
+    r = fitz.paper_rect("a4")
+    if r.width < r.height:
+        r = fitz.Rect(r.y0, r.x0, r.y1, r.x1)
+    return r
+
+def a4_rect_portrait() -> fitz.Rect:
+    r = fitz.paper_rect("a4")
+    if r.height < r.width:
+        r = fitz.Rect(r.y0, r.x0, r.y1, r.x1)
+    return r
+
+def split_2up(rect: fitz.Rect) -> Tuple[fitz.Rect, fitz.Rect]:
+    midx = (rect.x0 + rect.x1) / 2
+    left = fitz.Rect(rect.x0, rect.y0, midx, rect.y1)
+    right = fitz.Rect(midx, rect.y0, rect.x1, rect.y1)
+    return left, right
+
+def grid_boxes(rect: fitz.Rect, rows: int, cols: int) -> List[fitz.Rect]:
+    boxes = []
+    w = (rect.x1 - rect.x0) / cols
+    h = (rect.y1 - rect.y0) / rows
+    for r in range(rows):
+        for c in range(cols):
+            boxes.append(fitz.Rect(rect.x0 + c*w, rect.y0 + r*h,
+                                   rect.x0 + (c+1)*w, rect.y0 + (r+1)*h))
+    return boxes
+
+def draw_src(page: fitz.Page, src_doc: fitz.Document, idx: Optional[int], box: fitz.Rect, margin=6):
+    if idx is None or idx < 0 or idx >= len(src_doc):
+        return
+    inner = fitz.Rect(box.x0 + margin, box.y0 + margin, box.x1 - margin, box.y1 - margin)
+    page.show_pdf_page(inner, src_doc, idx)
+
+def booklet_order_within_signature(sig_pages: int) -> List[Tuple[Tuple[int,int], Tuple[int,int]]]:
+    S = sig_pages
+    left, right = 1, S
+    sheets = []
+    while left < right:
+        front = (right, left)
+        left += 1; right -= 1
+        back = (left, right)
+        left += 1; right -= 1
+        sheets.append((front, back))
+    return sheets
+
+
+# ------------------------------------------------------------
+# Imposition
+# ------------------------------------------------------------
+
+def impose_A5_booklet(src_doc: fitz.Document, plan: Plan, log: QTextEdit) -> fitz.Document:
+    dst = fitz.Document()
+    page_rect = a4_rect_landscape()
+
+    N = len(src_doc)
+    total_needed = plan.total_pages
+    padded = list(range(N)) + [None] * (total_needed - N)
+
+    cursor = 0
+    for S in plan.sequence:
+        rel = padded[cursor:cursor + S]
+        if len(rel) < S:
+            rel += [None] * (S - len(rel))
+
+        order = booklet_order_within_signature(S)
+        for (front, back) in order:
+            sheet = dst.new_page(width=page_rect.width, height=page_rect.height)
+            left_box, right_box = split_2up(page_rect)
+            fL = rel[front[0]-1] if 1 <= front[0] <= S else None
+            fR = rel[front[1]-1] if 1 <= front[1] <= S else None
+            draw_src(sheet, src_doc, fL, left_box)
+            draw_src(sheet, src_doc, fR, right_box)
+
+            sheet = dst.new_page(width=page_rect.width, height=page_rect.height)
+            left_box, right_box = split_2up(page_rect)
+            bL = rel[back[0]-1] if 1 <= back[0] <= S else None
+            bR = rel[back[1]-1] if 1 <= back[1] <= S else None
+            draw_src(sheet, src_doc, bL, left_box)
+            draw_src(sheet, src_doc, bR, right_box)
+
+        cursor += S
+
+    log.append(f"Created {len(dst)} A4 landscape pages (duplex spreads) for A5 booklet.")
+    return dst
+
+def impose_A6_nup(src_doc: fitz.Document, plan: Plan, log: QTextEdit) -> fitz.Document:
+    dst = fitz.Document()
+    page_rect = a4_rect_portrait()
+    boxes = grid_boxes(page_rect, 2, 2)
+
+    N = len(src_doc)
+    padded = list(range(N)) + [None] * (plan.total_pages - N)
+
+    i = 0
+    while i < len(padded):
+        page = dst.new_page(width=page_rect.width, height=page_rect.height)
+        for box in boxes:
+            if i >= len(padded):
+                break
+            draw_src(page, src_doc, padded[i], box)
+            i += 1
+
+    log.append(f"Created {len(dst)} A4 portrait pages with 4-up (A6 panels).")
+    return dst
+
+def impose_A7_nup(src_doc: fitz.Document, plan: Plan, log: QTextEdit) -> fitz.Document:
+    dst = fitz.Document()
+    page_rect = a4_rect_landscape()
+    boxes = grid_boxes(page_rect, 2, 4)
+
+    N = len(src_doc)
+    padded = list(range(N)) + [None] * (plan.total_pages - N)
+
+    i = 0
+    while i < len(padded):
+        page = dst.new_page(width=page_rect.width, height=page_rect.height)
+        for box in boxes:
+            if i >= len(padded):
+                break
+            draw_src(page, src_doc, padded[i], box)
+            i += 1
+
+    log.append(f"Created {len(dst)} A4 landscape pages with 8-up (A7 panels).")
+    return dst
+
+
+# ------------------------------------------------------------
+# GUI
+# ------------------------------------------------------------
+
+class App(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("A4 → A5/A6/A7 Imposition (Best Signature Fit)")
+        self.resize(860, 620)
+
+        lay = QVBoxLayout(self)
+
+        row = QHBoxLayout()
+        self.label_file = QLabel("No file selected")
+        btn_browse = QPushButton("Upload A4 PDF…")
+        btn_browse.clicked.connect(self.load_pdf)
+        row.addWidget(self.label_file, 1)
+        row.addWidget(btn_browse)
+        lay.addLayout(row)
+
+        row2 = QHBoxLayout()
+        row2.addWidget(QLabel("Target:"))
+        self.combo_target = QComboBox()
+        self.combo_target.addItems(["A5 booklet (2-up spreads)", "A6 n-up (4-up)", "A7 n-up (8-up)"])
+        row2.addWidget(self.combo_target, 1)
+        self.btn_go = QPushButton("Convert / Impose")
+        self.btn_go.clicked.connect(self.run_impose)
+        row2.addWidget(self.btn_go)
+        lay.addLayout(row2)
+
+        self.log = QTextEdit()
+        self.log.setReadOnly(True)
+        self.log.setPlaceholderText("Log will appear here…")
+        lay.addWidget(self.log, 1)
+
+        self.src_path = None
+
+    def load_pdf(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select A4 PDF", "", "PDF Files (*.pdf)")
+        if not path:
+            return
+        self.src_path = path
+        self.label_file.setText(path)
+        self.log.append(f"Selected: {path}")
+
+    def run_impose(self):
+        if not self.src_path:
+            QMessageBox.warning(self, "No file", "Please upload an A4 PDF first.")
+            return
+
+        try:
+            src_doc = fitz.open(self.src_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Open failed", f"Could not open PDF:\n{e}")
+            return
+
+        n_pages = len(src_doc)
+        if n_pages == 0:
+            QMessageBox.warning(self, "Empty PDF", "The selected PDF has no pages.")
+            return
+
+        best, all_plans = choose_best_plan(n_pages)
+
+        self.log.append("---- Signature Planning (All Options) ----")
+        self.log.append(f"Total pages in source: {n_pages}")
+        for p in all_plans:
+            self.log.append(
+                f"Pair [{p.pair[0]}, {p.pair[1]}] -> {p.expression} = {p.total_pages} pages "
+                f"({p.blanks} blank)"
+            )
+
+        self.log.append("\n---- Best Fit ----")
+        self.log.append(f"Best signature pair: [{best.pair[0]}, {best.pair[1]}]")
+        self.log.append(f"Combination: {best.expression} = {best.total_pages} pages")
+        self.log.append(f"Blank pages (added at end): {best.blanks}")
+        self.log.append("Sequence array (in order for printing):")
+        self.log.append(str(best.sequence))
+
+        target = self.combo_target.currentText()
+        self.log.append("\n---- Imposition ----")
+        if "A5 booklet" in target:
+            out_doc = impose_A5_booklet(src_doc, best, self.log)
+            suffix = "_A5_booklet_spreads.pdf"
+        elif "A6" in target:
+            out_doc = impose_A6_nup(src_doc, best, self.log)
+            suffix = "_A6_4up.pdf"
+        else:
+            out_doc = impose_A7_nup(src_doc, best, self.log)
+            suffix = "_A7_8up.pdf"
+
+        out_path = self.src_path.rsplit(".", 1)[0] + suffix
+        try:
+            out_doc.save(out_path)
+            out_doc.close()
+        except Exception as e:
+            QMessageBox.critical(self, "Save failed", f"Could not save output:\n{e}")
+            return
+
+        self.log.append(f"Saved: {out_path}")
+        QMessageBox.information(self, "Done", f"Created:\n{out_path}")
+
+
+def main():
+    app = QApplication(sys.argv)
+    w = App()
+    w.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
