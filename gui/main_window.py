@@ -5,16 +5,18 @@ from PyQt6.QtWidgets import (
 import fitz
 
 from core.signature_logic import choose_best_plan
-from core.imposition import impose_A5_booklet, impose_A6_nup, impose_A7_nup
+from core.imposition import impose_cut_stack
+
 
 class App(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("A4 → A5/A6/A7 Imposition (Best Signature Fit)")
+        self.setWindowTitle("A4 → A5/A6/A7 Imposition (Staged Signatures)")
         self.resize(860, 620)
 
         lay = QVBoxLayout(self)
 
+        # file row
         row = QHBoxLayout()
         self.label_file = QLabel("No file selected")
         btn_browse = QPushButton("Upload A4 PDF…")
@@ -23,16 +25,32 @@ class App(QWidget):
         row.addWidget(btn_browse)
         lay.addLayout(row)
 
+        # controls row
         row2 = QHBoxLayout()
         row2.addWidget(QLabel("Target:"))
         self.combo_target = QComboBox()
-        self.combo_target.addItems(["A5 booklet (2-up spreads)", "A6 n-up (4-up)", "A7 n-up (8-up)"])
+        self.combo_target.addItems([
+            "A5 booklet (fold once)",
+            "A6 booklet (fold twice)",
+            "A7 booklet (fold thrice)"
+        ])
         row2.addWidget(self.combo_target, 1)
+
+        # NEW: Reading direction (affects back rotation)
+        row2.addWidget(QLabel("Reading direction:"))
+        self.combo_binding = QComboBox()
+        self.combo_binding.addItems([
+            "LTR (left-to-right)",
+            "RTL (right-to-left)"
+        ])
+        row2.addWidget(self.combo_binding, 1)
+
         self.btn_go = QPushButton("Convert / Impose")
         self.btn_go.clicked.connect(self.run_impose)
         row2.addWidget(self.btn_go)
         lay.addLayout(row2)
 
+        # log
         self.log = QTextEdit()
         self.log.setReadOnly(True)
         self.log.setPlaceholderText("Log will appear here…")
@@ -59,38 +77,48 @@ class App(QWidget):
             QMessageBox.critical(self, "Open failed", f"Could not open PDF:\n{e}")
             return
 
-        n_pages = len(src_doc)
-        if n_pages == 0:
+        if len(src_doc) == 0:
             QMessageBox.warning(self, "Empty PDF", "The selected PDF has no pages.")
             return
 
-        best, all_plans = choose_best_plan(n_pages)
-
-        self.log.append("---- Signature Planning (All Options) ----")
-        self.log.append(f"Total pages in source: {n_pages}")
-        for p in all_plans:
-            self.log.append(
-                f"Pair [{p.pair[0]}, {p.pair[1]}] -> {p.expression} = {p.total_pages} pages ({p.blanks} blank)"
-            )
-
-        self.log.append("\n---- Best Fit ----")
-        self.log.append(f"Best signature pair: [{best.pair[0]}, {best.pair[1]}]")
-        self.log.append(f"Combination: {best.expression} = {best.total_pages} pages")
-        self.log.append(f"Blank pages (added at end): {best.blanks}")
-        self.log.append("Sequence array (in order for printing):")
-        self.log.append(str(best.sequence))
-
         target = self.combo_target.currentText()
-        self.log.append("\n---- Imposition ----")
-        if "A5 booklet" in target:
-            out_doc = impose_A5_booklet(src_doc, best, self.log)
-            suffix = "_A5_booklet_spreads.pdf"
-        elif "A6" in target:
-            out_doc = impose_A6_nup(src_doc, best, self.log)
-            suffix = "_A6_4up.pdf"
-        else:
-            out_doc = impose_A7_nup(src_doc, best, self.log)
-            suffix = "_A7_8up.pdf"
+        binding_choice = self.combo_binding.currentText()
+        binding = "RTL" if "RTL" in binding_choice.upper() else "LTR"
+
+        self.log.append("\n---- Imposition (Staged Pipeline) ----")
+        best, _ = choose_best_plan(len(src_doc))
+
+        try:
+            if "A5" in target:
+                out_doc = impose_cut_stack(
+                    src_doc, best, self.log,
+                    level=1,
+                    binding=binding,
+                    emit_blank_tail_signature=False
+                )
+                suffix = "_A5_booklet.pdf"
+
+            elif "A6" in target:
+                out_doc = impose_cut_stack(
+                    src_doc, best, self.log,
+                    level=2,
+                    binding=binding,
+                    emit_blank_tail_signature=False
+                )
+                suffix = "_A6_booklet.pdf"
+
+            else:
+                out_doc = impose_cut_stack(
+                    src_doc, best, self.log,
+                    level=3,
+                    binding=binding,
+                    emit_blank_tail_signature=False
+                )
+                suffix = "_A7_booklet.pdf"
+
+        except Exception as e:
+            QMessageBox.critical(self, "Imposition failed", f"An error occurred:\n{e}")
+            return
 
         out_path = self.src_path.rsplit('.', 1)[0] + suffix
         try:

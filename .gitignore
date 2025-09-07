@@ -1,7 +1,21 @@
+# Python
 __pycache__/
 *.pyc
-.pytest_cache/
+*.pyo
+*.pyd
+*.pytest_cache/
+*.coverage
+.coverage*
+dist/
+build/
+
+# Environments
+venv/
+.env/
+.venv/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
 .vscode/
-*.zip
-/dist
-/build
