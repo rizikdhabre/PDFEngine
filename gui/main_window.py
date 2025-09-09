@@ -40,8 +40,8 @@ class App(QWidget):
         row2.addWidget(QLabel("Reading direction:"))
         self.combo_binding = QComboBox()
         self.combo_binding.addItems([
-            "LTR (left-to-right)",
-            "RTL (right-to-left)"
+            "LTR (left-to-right(English))",
+            "RTL (right-to-left(Hebrew, Arabic))"
         ])
         row2.addWidget(self.combo_binding, 1)
 

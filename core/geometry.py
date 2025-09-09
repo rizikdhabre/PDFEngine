@@ -1,15 +1,20 @@
+# core/geometry.py
+
 import fitz
-from typing import List, Optional, Tuple,Any
-from config import PAGE_MARGIN
+from typing import List, Optional, Tuple, Any
+from config import PAGE_MARGIN  # (kept if used elsewhere)
+
+LEVEL_GRIDS = {1: (2, 1), 2: (2, 2), 3: (4, 2)}
+
 
 def rotate_cw(seq: List[Any]) -> List[Any]:
     """
     90° clockwise rotation treating seq as a 2 x (n/2) grid:
     top = seq[:c], bottom = seq[c:], then [b0,t0,b1,t1,...].
     Examples:
-      [1,2]           -> [2,1]
-      [1,2,3,4]       -> [3,1,4,2]   ([[1,2],[3,4]] -> [[3,1],[4,2]])
-      [1,2,3,4,5,6,7,8] -> [5,1,6,2,7,3,8,4]
+      [1,2]             -> [2,1]
+      [1,2,3,4]         -> [3,1,4,2]
+      [1..8]            -> [5,1,6,2,7,3,8,4]
     """
     n = len(seq)
     if n == 1:
@@ -22,49 +27,115 @@ def rotate_cw(seq: List[Any]) -> List[Any]:
         out.append(top[i])
     return out
 
+
+def paginate_to_matrix(num_pages: int, level: int, counter: int = 1) -> List[List[Optional[int]]]:
+    """Rows of length 2**level, filled from `counter`… (pad last row with None)."""
+    inner_len = 1 << level
+    matrix: List[List[Optional[int]]] = []
+    page = counter
+    last = counter + num_pages - 1
+    while page <= last:
+        row: List[Optional[int]] = []
+        for _ in range(inner_len):
+            row.append(page if page <= last else None)
+            page += 1
+        matrix.append(row)
+    return matrix
+
+
 def process_2d_array(matrix: List[List[Any]], level: int) -> List[List[Any]]:
     if not matrix or not matrix[0]:
         return []
 
     current = [row[:] for row in matrix]
-    flag = 0  # 0 = rotation not yet used; 1 = rotation already used
+    did_rotate = False
 
-    for step in range(level):
+    for _ in range(level):
+        if len(current[0]) <= 2:
+            break
+
         lefts, rights = [], []
-        # Decide once per level whether to rotate this whole pass
-        rotate_now = (level == 3 and flag == 0)
+        rotate_now = (level == 3 and not did_rotate)
 
         for arr in current:
             mid = len(arr) // 2
-
             if rotate_now:
-                L = rotate_cw(arr[:mid])   # rotate AFTER split
-                # print(f"This is lefts step after step {lefts + [L]}")
+                L = rotate_cw(arr[:mid])
                 R = rotate_cw(arr[mid:])
-                # print(f"This is rights step after step {rights + [R]}")
             else:
                 L = arr[:mid]
-                # print(f"This is lefts step after step {lefts + [L]}")
                 R = arr[mid:]
-                # print(f"This is rights step after step {rights + [R]}")
 
             lefts.append(L)
             rights.append(R)
 
         current = lefts + rights
 
-        # Mark rotation as used so it happens only once total
         if rotate_now:
-            flag = 1
+            did_rotate = True
 
     return current
+
+
+def split_front_back(arr: List[Any]) -> (List[Any], List[Any]):
+    front = [x for i, x in enumerate(arr, start=1) if i % 2 == 1]
+    back  = [x for i, x in enumerate(arr, start=1) if i % 2 == 0]
+    return front, back
+
+
+def front_pairs(fronts: List[List[Any]], level: int, signature_pages: int) -> List[Tuple[int, int]]:
+    n = len(fronts)
+    pairs: List[Tuple[int, int]] = []
+    for k in range(n):
+        odd  = 1 + 2 * k
+        mate = signature_pages - 2 * k
+        pairs.append((odd, mate))
+    return pairs
+
+
+def back_pairs(backs: List[List[Any]], level: int, signature_pages: int) -> List[Tuple[int, int]]:
+    n = len(backs)
+    pairs: List[Tuple[int, int]] = []
+    for k in range(n):
+        even = 2 + 2 * k
+        mate = signature_pages - (2 * k + 1)
+        pairs.append((even, mate))
+    return pairs
+
+
+def panels_per_side(level: int) -> int:
+    rows, cols = LEVEL_GRIDS[level]
+    return rows * cols
+
+
+def panel_to_sheet_side(panel: int, level: int, *, binding: str = "LTR") -> Tuple[int, str, str]:
+    per_side = panels_per_side(level)
+    per_sheet = per_side * 2
+    sheet = (panel - 1) // per_sheet + 1
+    side_is_front = ((panel - 1) % per_sheet) < per_side
+    side = "front" if side_is_front else "back"
+
+    # Orientation label follows binding
+    if binding.upper() == "RTL":
+        orientation = "R→L" if side_is_front else "L→R"
+    else:
+        orientation = "L→R" if side_is_front else "R→L"
+
+    return sheet, side, orientation
+
+
+def end_blanks(signature_pages: int, blank_pages: int) -> set[int]:
+    if blank_pages <= 0:
+        return set()
+    start = signature_pages - blank_pages + 1
+    return set(range(start, signature_pages + 1))
 
 
 def a4_rect_landscape() -> fitz.Rect:
     """A4 in landscape (w > h)."""
     r = fitz.paper_rect("a4")
     if r.width < r.height:
-        r = fitz.Rect(r.y0, r.x0, r.y1, r.x1)  # swap
+        r = fitz.Rect(r.y0, r.x0, r.y1, r.x1)
     return r
 
 
@@ -72,24 +143,8 @@ def a4_rect_portrait() -> fitz.Rect:
     """A4 in portrait (h > w)."""
     r = fitz.paper_rect("a4")
     if r.height < r.width:
-        r = fitz.Rect(r.y0, r.x0, r.y1, r.x1)  # swap
+        r = fitz.Rect(r.y0, r.x0, r.y1, r.x1)
     return r
-
-
-def split_2up(rect: fitz.Rect) -> Tuple[fitz.Rect, fitz.Rect]:
-    """Split into left/right halves."""
-    midx = (rect.x0 + rect.x1) / 2.0
-    left = fitz.Rect(rect.x0, rect.y0, midx, rect.y1)
-    right = fitz.Rect(midx, rect.y0, rect.x1, rect.y1)
-    return left, right
-
-
-def split_tb(rect: fitz.Rect) -> Tuple[fitz.Rect, fitz.Rect]:
-    """Split into top/bottom halves."""
-    midy = (rect.y0 + rect.y1) / 2.0
-    top = fitz.Rect(rect.x0, rect.y0, rect.x1, midy)
-    bottom = fitz.Rect(rect.x0, midy, rect.x1, rect.y1)
-    return top, bottom
 
 
 def grid_boxes(rect: fitz.Rect, rows: int, cols: int) -> List[fitz.Rect]:
@@ -110,49 +165,3 @@ def grid_boxes(rect: fitz.Rect, rows: int, cols: int) -> List[fitz.Rect]:
                 )
             )
     return boxes
-
-
-def subdivide_boxes(rect: fitz.Rect, depth: int, first_axis: str = "tb") -> List[fitz.Rect]:
-    """
-    Recursively subdivide 'rect' into 2**depth panels in a folding-friendly order.
-
-    For A7 with your method (fold forward → spine top → rotate CW → spine right),
-    we split TOP/BOTTOM first (depth 1), then alternate LR/TB for deeper folds.
-
-    depth = 0 -> [rect]
-    depth = 1 -> [top, bottom]
-    depth = 2 -> [top-left, top-right, bottom-left, bottom-right]
-    depth = 3 -> 8 panels per side, etc.
-    """
-    if depth <= 0:
-        return [rect]
-
-    if first_axis == "tb":
-        top, bottom = split_tb(rect)
-        # alternate axis next
-        return subdivide_boxes(top, depth - 1, "lr") + subdivide_boxes(bottom, depth - 1, "lr")
-    else:
-        left, right = split_2up(rect)
-        return subdivide_boxes(left, depth - 1, "tb") + subdivide_boxes(right, depth - 1, "tb")
-
-
-def draw_src(page: fitz.Page,
-             src_doc: fitz.Document,
-             idx: Optional[int],
-             box: fitz.Rect,
-             rotate: int = 0,
-             margin: float = PAGE_MARGIN) -> None:
-    """
-    Draw zero-based page 'idx' from src_doc into 'box' with optional rotation.
-    idx=None -> leave blank. 'rotate' is degrees (0, 90, 180, 270).
-    """
-    if idx is None:
-        return
-    if idx < 0 or idx >= len(src_doc):
-        return
-    inner = fitz.Rect(
-        box.x0 + margin, box.y0 + margin,
-        box.x1 - margin, box.y1 - margin
-    )
-    # show_pdf_page(rect, src, pno, clip=None, rotate=0, overlay=True)
-    page.show_pdf_page(inner, src_doc, idx, rotate=rotate)
