@@ -11,11 +11,12 @@ from core.imposition import impose_cut_stack
 class App(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("A4 → A5/A6/A7 Imposition (Staged Signatures)")
+        self.setWindowTitle("A4 → A5/A6/A7/A8 Imposition")
         self.resize(860, 620)
 
         lay = QVBoxLayout(self)
-
+        
+        
         # file row
         row = QHBoxLayout()
         self.label_file = QLabel("No file selected")
@@ -32,7 +33,8 @@ class App(QWidget):
         self.combo_target.addItems([
             "A5 booklet (fold once)",
             "A6 booklet (fold twice)",
-            "A7 booklet (fold thrice)"
+            "A7 booklet (fold thrice)",
+            "A8 booklet (fold four times)"
         ])
         row2.addWidget(self.combo_target, 1)
 
@@ -57,6 +59,16 @@ class App(QWidget):
         lay.addWidget(self.log, 1)
 
         self.src_path = None
+
+    def _unique_path(self, path: str) -> str:
+        import os
+        base, ext = os.path.splitext(path)
+        if not os.path.exists(path):
+            return path
+        i = 1
+        while os.path.exists(f"{base}({i}){ext}"):
+            i += 1
+        return f"{base}({i}){ext}"
 
     def load_pdf(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select A4 PDF", "", "PDF Files (*.pdf)")
@@ -107,7 +119,7 @@ class App(QWidget):
                 )
                 suffix = "_A6_booklet.pdf"
 
-            else:
+            elif "A7" in target:
                 out_doc = impose_cut_stack(
                     src_doc, best, self.log,
                     level=3,
@@ -116,11 +128,23 @@ class App(QWidget):
                 )
                 suffix = "_A7_booklet.pdf"
 
+            else:
+                out_doc = impose_cut_stack(
+                    src_doc, best, self.log,
+                    level=4,
+                    binding=binding,
+                    emit_blank_tail_signature=False
+                )
+                suffix = "_A8_booklet.pdf"
+
+
         except Exception as e:
+            src_doc.close()
             QMessageBox.critical(self, "Imposition failed", f"An error occurred:\n{e}")
             return
 
         out_path = self.src_path.rsplit('.', 1)[0] + suffix
+        out_path = self._unique_path(out_path)
         try:
             out_doc.save(out_path)
             out_doc.close()

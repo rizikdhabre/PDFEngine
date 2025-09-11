@@ -4,7 +4,7 @@ import fitz
 from typing import List, Optional, Tuple, Any
 from config import PAGE_MARGIN  # (kept if used elsewhere)
 
-LEVEL_GRIDS = {1: (2, 1), 2: (2, 2), 3: (4, 2)}
+LEVEL_GRIDS = {1: (2, 1), 2: (2, 2), 3: (4, 2),4 : (4, 4)}
 
 
 def rotate_cw(seq: List[Any]) -> List[Any]:
@@ -48,33 +48,33 @@ def process_2d_array(matrix: List[List[Any]], level: int) -> List[List[Any]]:
         return []
 
     current = [row[:] for row in matrix]
-    did_rotate = False
+
+    # rotate once for level 3, twice for level 4, otherwise none
+    rotations_left = 1 if level == 3 else (2 if level == 4 else 0)
 
     for _ in range(level):
         if len(current[0]) <= 2:
             break
 
         lefts, rights = [], []
-        rotate_now = (level == 3 and not did_rotate)
+        rotate_now = rotations_left > 0
 
         for arr in current:
             mid = len(arr) // 2
+            L, R = arr[:mid], arr[mid:]
             if rotate_now:
-                L = rotate_cw(arr[:mid])
-                R = rotate_cw(arr[mid:])
-            else:
-                L = arr[:mid]
-                R = arr[mid:]
-
+                L = rotate_cw(L)
+                R = rotate_cw(R)
             lefts.append(L)
             rights.append(R)
 
         current = lefts + rights
 
         if rotate_now:
-            did_rotate = True
+            rotations_left -= 1
 
     return current
+
 
 
 def split_front_back(arr: List[Any]) -> (List[Any], List[Any]):

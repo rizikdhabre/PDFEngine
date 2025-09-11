@@ -18,7 +18,8 @@ from core.geometry import (
 )
 
 # Local grids for drawing (box layout)
-LEVEL_GRIDS = {1: (2, 1), 2: (2, 2), 3: (4, 2)}
+LEVEL_GRIDS = {1: (2, 1), 2: (2, 2), 3: (4, 2), 4: (4, 4)}
+
 
 
 # ------------------------
@@ -157,25 +158,30 @@ def draw_booklet_signatures_by_global_panels(
     out = fitz.open()
     boxes = grid_boxes(rect, rows, cols)
 
-    delta = 0 if binding.upper() == "LTR" else 180
-    front_angle = ((((level - 1) * 90) + 90) + delta) % 360
-    delta = 0 if binding.upper() == "LTR" else 180
-    front_angle = ((((level - 1) * 90) + 90) + delta) % 360
-    # Extra 180° CCW on fronts for RTL A6 or A5
-    if binding.upper() == "RTL" and level in (1, 2):
-        front_angle = (front_angle - 180) % 360
-    back_angle  = (front_angle + 180) % 360
+    # rotation (portrait output)
+    if level == 4:
+        front_angle = 0
+        back_angle  = 0
+    else:
+        delta = 0 if binding.upper() == "LTR" else 180
+        front_angle = ((((level - 1) * 90) + 90) + delta) % 360
+        if binding.upper() == "RTL" and level in (1, 2):
+            front_angle = (front_angle - 180) % 360
+        back_angle  = (front_angle + 180) % 360
+
+    if level==2:
+         back_angle = (back_angle - 180) % 360
+
     # placement orders per binding
     ltr_order = list(range(per_side))          # row-major L→R
     rtl_order = _rtl_order_indices(rows, cols) # row-major R→L
     if binding.upper() == "RTL":
-        # RTL binding: fronts R→L, backs L→R
         front_order = rtl_order
         back_order  = ltr_order
     else:
-        # LTR binding: fronts L→R, backs R→L
         front_order = ltr_order
         back_order  = rtl_order
+
 
     # NEW: for A5 (cols==1), RTL requires vertical flip (top↔bottom)
     vertical_flip = (cols == 1 and binding.upper() == "RTL")
