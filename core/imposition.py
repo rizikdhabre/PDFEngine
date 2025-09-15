@@ -74,6 +74,20 @@ def _rtl_order_indices(rows: int, cols: int) -> List[int]:
             out.append(base + c)
     return out
 
+def interleaved_blank_locals(orig_sig_pages: int, padded_sig_pages: int) -> set[int]:
+    """Return local-page numbers that should be blank, in order: N,1,N-1,2,..."""
+    k = padded_sig_pages - orig_sig_pages
+    if k <= 0:
+        return set()
+    out = []
+    lo, hi = 1, padded_sig_pages
+    while len(out) < k:
+        out.append(hi); hi -= 1
+        if len(out) < k:
+            out.append(lo); lo += 1
+    return set(out)
+
+
 
 def _build_imposition_records_from_pairs(
     fronts,
@@ -97,6 +111,7 @@ def _build_imposition_records_from_pairs(
     """
     records: List[Dict[str, Any]] = []
     sig_first_global_panel = panel_offset_padded + 1  # 1-based
+    blanks_set = interleaved_blank_locals(orig_sig_pages, padded_sig_pages)
 
     def _emit(local_page: int, panel_global_number: int):
         # Convert global panel number to LOCAL (1..padded)
@@ -105,7 +120,7 @@ def _build_imposition_records_from_pairs(
 
         sheet, side, orientation = panel_to_sheet_side(global_panel, level, binding=binding)
         # global_page ignores blanks; None for tail blanks
-        is_blank = local_page > orig_sig_pages
+        is_blank = (local_page in blanks_set)
         global_page = None if is_blank else (start_global_page_real + local_page - 1)
 
         records.append({
@@ -267,6 +282,7 @@ def impose_cut_stack(src_doc: fitz.Document,
     for i, orig_sig_pages in enumerate(plan.sequence, start=1):
         # derive padded count directly
         rem = orig_sig_pages % per_sheet
+        log.append(f"[DEBUG] Signature #{i}: original pages={orig_sig_pages}, remainder={rem} (per_sheet={per_sheet})")
         padded_sig_pages = orig_sig_pages if rem == 0 else orig_sig_pages + (per_sheet - rem)
 
         log.append(f"[INFO] Signature #{i}: real={orig_sig_pages}, padded={padded_sig_pages}")
